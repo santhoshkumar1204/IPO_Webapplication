@@ -7,16 +7,12 @@ import os
 import sys
 from datetime import datetime, date, timedelta
 from decimal import Decimal
-from pathlib import Path
 
 # Set Django settings
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', '__main__')
 
 import django
 from django.conf import settings
-
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
-BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Configure Django
 settings.configure(
@@ -114,14 +110,16 @@ from django.core.wsgi import get_wsgi_application
 from django.core.management import execute_from_command_line
 from django_filters.rest_framework import DjangoFilterBackend
 
-# IPO Models
+# IPO Models (Transformed from Task/Category models)
 class Sector(models.Model):
     name = models.CharField(max_length=100, unique=True)
     description = models.TextField(blank=True)
+    color = models.CharField(max_length=7, default='#000000')  # Keeping color from original Category
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         app_label = 'backend'
+        verbose_name_plural = 'sectors'
         ordering = ['name']
 
     def __str__(self):
@@ -136,39 +134,50 @@ class IPO(models.Model):
         ('cancelled', 'Cancelled'),
     ]
 
+    # Basic IPO Information
     company_name = models.CharField(max_length=200)
     company_logo = models.URLField(blank=True, null=True)
     sector = models.ForeignKey(Sector, on_delete=models.SET_NULL, null=True, blank=True)
+    
+    # IPO Dates
     ipo_open_date = models.DateField()
     ipo_close_date = models.DateField()
+    listing_date = models.DateField(null=True, blank=True)
+    
+    # Price Information
     price_band_min = models.DecimalField(max_digits=10, decimal_places=2)
     price_band_max = models.DecimalField(max_digits=10, decimal_places=2)
     lot_size = models.IntegerField()
+    
+    # Issue Size
     total_issue_size = models.BigIntegerField(help_text="Total issue size in rupees")
     fresh_issue = models.BigIntegerField(default=0, help_text="Fresh issue amount in rupees")
     offer_for_sale = models.BigIntegerField(default=0, help_text="Offer for sale amount in rupees")
+    
+    # Documents and Links
     rhp_link = models.URLField(help_text="Red Herring Prospectus link")
-    listing_date = models.DateField(null=True, blank=True)
+    
+    # Status
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='upcoming')
     
-    # Additional IPO details
+    # Market Participants
     lead_managers = models.TextField(help_text="Comma separated lead managers")
     registrar = models.CharField(max_length=200, blank=True)
     market_maker = models.CharField(max_length=200, blank=True)
     
-    # Subscription details
+    # Subscription Details
     retail_subscription = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     qib_subscription = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     nii_subscription = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     
-    # Trading details
+    # Listing Details
     listing_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     listing_gains = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Listing gains in percentage")
     
-    # Meta information
+    # Meta Information (keeping similar to original Task model)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_ipos')
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -185,20 +194,21 @@ class IPO(models.Model):
     @property
     def is_open(self):
         today = date.today()
-        return self.ipo_open_date <= today <= self.ipo_close_date
+        return self.ipo_open_date <= today <= self.ipo_close_date and self.status == 'open'
 
     @property
     def days_remaining(self):
+        today = date.today()
         if self.status == 'upcoming':
-            return (self.ipo_open_date - date.today()).days
+            return max(0, (self.ipo_open_date - today).days)
         elif self.status == 'open':
-            return (self.ipo_close_date - date.today()).days
+            return max(0, (self.ipo_close_date - today).days)
         return 0
 
 class IPOApplication(models.Model):
-    """Track user applications to IPOs"""
+    """User IPO Applications (similar to user-specific tasks)"""
     ipo = models.ForeignKey(IPO, on_delete=models.CASCADE, related_name='applications')
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ipo_applications')
     bid_price = models.DecimalField(max_digits=10, decimal_places=2)
     quantity = models.IntegerField(help_text="Number of lots")
     total_amount = models.DecimalField(max_digits=15, decimal_places=2)
@@ -213,19 +223,21 @@ class IPOApplication(models.Model):
     class Meta:
         app_label = 'backend'
         unique_together = ['ipo', 'user']
+        ordering = ['-application_date']
 
     def __str__(self):
         return f"{self.user.username} - {self.ipo.company_name}"
 
-# Serializers
+# Serializers (Enhanced from original)
 class SectorSerializer(serializers.ModelSerializer):
     class Meta:
         model = Sector
-        fields = ['id', 'name', 'description', 'created_at']
+        fields = ['id', 'name', 'description', 'color', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 class IPOSerializer(serializers.ModelSerializer):
     sector_name = serializers.CharField(source='sector.name', read_only=True)
+    sector_color = serializers.CharField(source='sector.color', read_only=True)
     price_band = serializers.CharField(read_only=True)
     is_open = serializers.BooleanField(read_only=True)
     days_remaining = serializers.IntegerField(read_only=True)
@@ -234,11 +246,11 @@ class IPOSerializer(serializers.ModelSerializer):
     class Meta:
         model = IPO
         fields = [
-            'id', 'company_name', 'company_logo', 'sector', 'sector_name',
-            'ipo_open_date', 'ipo_close_date', 'price_band_min', 'price_band_max',
+            'id', 'company_name', 'company_logo', 'sector', 'sector_name', 'sector_color',
+            'ipo_open_date', 'ipo_close_date', 'listing_date', 'price_band_min', 'price_band_max',
             'price_band', 'lot_size', 'total_issue_size', 'fresh_issue', 'offer_for_sale',
-            'rhp_link', 'listing_date', 'status', 'lead_managers', 'registrar',
-            'market_maker', 'retail_subscription', 'qib_subscription', 'nii_subscription',
+            'rhp_link', 'status', 'lead_managers', 'registrar', 'market_maker',
+            'retail_subscription', 'qib_subscription', 'nii_subscription',
             'listing_price', 'listing_gains', 'is_open', 'days_remaining',
             'created_at', 'updated_at', 'created_by_username', 'is_active'
         ]
@@ -262,7 +274,7 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'email', 'first_name', 'last_name', 'date_joined', 'is_staff']
         read_only_fields = ['id', 'date_joined']
 
-# ViewSets
+# ViewSets (Enhanced from original Task/Category ViewSets)
 class SectorViewSet(viewsets.ModelViewSet):
     queryset = Sector.objects.all()
     serializer_class = SectorSerializer
@@ -283,7 +295,7 @@ class IPOViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = IPO.objects.filter(is_active=True)
         
-        # Filter by date ranges
+        # Additional filtering
         open_from = self.request.query_params.get('open_from')
         open_to = self.request.query_params.get('open_to')
         
@@ -299,21 +311,21 @@ class IPOViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def upcoming(self, request):
-        """Get only upcoming IPOs"""
+        """Get upcoming IPOs only"""
         upcoming_ipos = self.get_queryset().filter(status='upcoming')
         serializer = self.get_serializer(upcoming_ipos, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def open_now(self, request):
-        """Get IPOs that are currently open"""
+        """Get currently open IPOs"""
         open_ipos = self.get_queryset().filter(status='open')
         serializer = self.get_serializer(open_ipos, many=True)
         return Response(serializer.data)
 
     @action(detail=False, methods=['get'])
     def statistics(self, request):
-        """Get IPO statistics"""
+        """Get IPO statistics (like original dashboard_stats)"""
         queryset = self.get_queryset()
         stats = {
             'total_ipos': queryset.count(),
@@ -324,6 +336,7 @@ class IPOViewSet(viewsets.ModelViewSet):
             'avg_listing_gains': queryset.filter(
                 listing_gains__isnull=False
             ).aggregate(models.Avg('listing_gains'))['listing_gains__avg'] or 0,
+            'total_sectors': Sector.objects.count(),
         }
         return Response(stats)
 
@@ -332,6 +345,7 @@ class IPOApplicationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        # Like original Task model - users see only their own applications
         if self.request.user.is_staff:
             return IPOApplication.objects.all()
         return IPOApplication.objects.filter(user=self.request.user)
@@ -339,7 +353,7 @@ class IPOApplicationViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
-# API Views
+# API Views (Enhanced from original)
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def api_overview(request):
@@ -360,6 +374,7 @@ def api_overview(request):
         'applications': '/api/applications/',
         'profile': '/api/profile/',
         'admin': '/admin/',
+        'auth': '/api-auth/login/',
     })
 
 @api_view(['GET'])
@@ -398,7 +413,27 @@ def register_user(request):
         'user': serializer.data
     }, status=status.HTTP_201_CREATED)
 
-# URL Configuration
+# Enhanced dashboard stats (keeping original functionality)
+@api_view(['GET'])
+def dashboard_stats(request):
+    if not request.user.is_authenticated:
+        return Response({'error': 'Not authenticated'}, status=status.HTTP_401_UNAUTHORIZED)
+    
+    user_applications = IPOApplication.objects.filter(user=request.user)
+    all_ipos = IPO.objects.filter(is_active=True)
+    
+    stats = {
+        'total_ipos': all_ipos.count(),
+        'my_applications': user_applications.count(),
+        'upcoming_ipos': all_ipos.filter(status='upcoming').count(),
+        'open_ipos': all_ipos.filter(status='open').count(),
+        'my_allotted': user_applications.filter(status='allotted').count(),
+        'total_sectors': Sector.objects.count(),
+    }
+    
+    return Response(stats)
+
+# URL Configuration (Enhanced from original)
 from rest_framework.routers import DefaultRouter
 
 router = DefaultRouter()
@@ -411,6 +446,7 @@ urlpatterns = [
     path('api/', api_overview, name='api-overview'),
     path('api/', include(router.urls)),
     path('api/profile/', user_profile, name='user-profile'),
+    path('api/dashboard/', dashboard_stats, name='dashboard-stats'),
     path('api/auth/register/', register_user, name='register'),
     path('api/auth/login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
@@ -422,25 +458,30 @@ application = get_wsgi_application()
 
 def create_dummy_data():
     """Create realistic IPO dummy data"""
-    print("📊 Creating dummy IPO data...")
+    print("📊 Creating IPO platform dummy data...")
     
-    # Create sectors
+    # Create sectors (enhanced from categories)
     sectors_data = [
-        {'name': 'Technology', 'description': 'Information Technology and Software companies'},
-        {'name': 'Financial Services', 'description': 'Banks, NBFCs, and Financial institutions'},
-        {'name': 'Healthcare', 'description': 'Pharmaceuticals and Healthcare companies'},
-        {'name': 'Manufacturing', 'description': 'Manufacturing and Industrial companies'},
-        {'name': 'Real Estate', 'description': 'Real Estate and Construction companies'},
-        {'name': 'Energy', 'description': 'Power, Oil & Gas companies'},
-        {'name': 'Consumer Goods', 'description': 'FMCG and Consumer products'},
-        {'name': 'Telecommunications', 'description': 'Telecom and Communication services'},
+        {'name': 'Technology', 'description': 'Information Technology and Software companies', 'color': '#007bff'},
+        {'name': 'Financial Services', 'description': 'Banks, NBFCs, and Financial institutions', 'color': '#28a745'},
+        {'name': 'Healthcare', 'description': 'Pharmaceuticals and Healthcare companies', 'color': '#dc3545'},
+        {'name': 'Manufacturing', 'description': 'Manufacturing and Industrial companies', 'color': '#fd7e14'},
+        {'name': 'Real Estate', 'description': 'Real Estate and Construction companies', 'color': '#6610f2'},
+        {'name': 'Energy', 'description': 'Power, Oil & Gas companies', 'color': '#e83e8c'},
+        {'name': 'Consumer Goods', 'description': 'FMCG and Consumer products', 'color': '#20c997'},
+        {'name': 'Telecommunications', 'description': 'Telecom and Communication services', 'color': '#6f42c1'},
     ]
     
     for sector_data in sectors_data:
         sector, created = Sector.objects.get_or_create(
             name=sector_data['name'],
-            defaults={'description': sector_data['description']}
+            defaults={
+                'description': sector_data['description'],
+                'color': sector_data['color']
+            }
         )
+        if created:
+            print(f"✅ Created Sector: {sector.name}")
     
     # Create sample IPOs
     ipos_data = [
@@ -555,10 +596,10 @@ def run_server():
     except Exception as e:
         print(f"⚠️  User creation info: {e}")
     
-    # Create dummy data
+    # Create IPO dummy data
     try:
         create_dummy_data()
-        print("✅ Dummy IPO data created!")
+        print("✅ IPO platform dummy data created!")
     except Exception as e:
         print(f"⚠️  Dummy data info: {e}")
     
@@ -576,6 +617,7 @@ def run_server():
     print("   📊 Statistics:     GET /api/ipos/statistics/")
     print("   🏭 Sectors:        GET /api/sectors/")
     print("   📝 Applications:   GET /api/applications/")
+    print("   📈 Dashboard:      GET /api/dashboard/")
     print("🔐 Authentication:")
     print("   🔑 Login:          POST /api/auth/login/")
     print("   ♻️  Refresh:        POST /api/auth/refresh/")
